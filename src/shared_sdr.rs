@@ -46,11 +46,14 @@ impl SharedSdr {
         let mut client = RtlTcpClient::connect(host, port).await?;
         client.set_sample_rate(self.sample_rate).await?;
         client.set_frequency(self.center_hz).await?;
-        client.set_agc_mode(true).await?;
+        client.set_gain_mode(true).await?;
+        client.set_gain(150).await?; // 15.0 dB
+        client.set_agc_mode(false).await?;
         tracing::info!(
             center_hz = self.center_hz,
             sample_rate = self.sample_rate,
             chunk_bytes = CHUNK_BYTES,
+            gain_db = 15.0,
             "rtl_tcp configured and streaming"
         );
 
