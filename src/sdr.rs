@@ -129,12 +129,21 @@ async fn stream_and_encode(
 
     let mut ffmpeg = tokio::process::Command::new("ffmpeg")
         .args([
-            "-v", "quiet",
-            "-fflags", "+nobuffer",
-            "-i", "pipe:0", "-vn",
-            "-c:a", "libopus",
-            "-f", "ogg", "-page_duration", "20000",
-            "-flush_packets", "1",
+            "-v",
+            "quiet",
+            "-fflags", 
+            "+nobuffer",
+            "-i", 
+            "pipe:0", 
+            "-vn",
+            "-c:a", 
+            "libopus",
+            "-f", 
+            "ogg", 
+            "-page_duration", 
+            "20000",
+            "-flush_packets", 
+            "1",
             "pipe:1",
         ])
         .stdin(Stdio::piped())
