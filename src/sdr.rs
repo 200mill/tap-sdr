@@ -103,6 +103,8 @@ impl TapHandler for SdrTapHandler {
             }
         });
 
+        stream.unreliable_only();
+
         tokio::spawn(async move {
             match stream_and_encode(reader, stream).await {
                 Ok(frames) => tracing::info!(frames, "stream encoder finished"),
