@@ -1,0 +1,19 @@
+services:
+  rtltcp:
+    image: kosdk/rtl-sdr
+    command: rtl_tcp -a 0.0.0.0 -p 1234
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+    ports:
+      - "1234:1234"
+    restart: unless-stopped
+
+  sdr-tap:
+    build: .
+    env_file: .env
+    environment:
+      RTLTCP_HOST: rtltcp
+      RTLTCP_PORT: "1234"
+    depends_on:
+      - rtltcp
+    restart: unless-stopped
