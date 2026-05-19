@@ -80,13 +80,13 @@ pub fn streaming_wav_header(sample_rate: u32, channels: u16) -> Vec<u8> {
     h.extend_from_slice(b"WAVE");
 
     h.extend_from_slice(b"fmt ");
-    h.extend_from_slice(&16u32.to_le_bytes());           // fmt chunk size
-    h.extend_from_slice(&1u16.to_le_bytes());            // PCM format
+    h.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+    h.extend_from_slice(&1u16.to_le_bytes()); // PCM format
     h.extend_from_slice(&channels.to_le_bytes());
     h.extend_from_slice(&sample_rate.to_le_bytes());
     h.extend_from_slice(&byte_rate.to_le_bytes());
     h.extend_from_slice(&block_align.to_le_bytes());
-    h.extend_from_slice(&16u16.to_le_bytes());           // bits per sample
+    h.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
 
     h.extend_from_slice(b"data");
     h.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // data chunk size (streaming)

@@ -1,8 +1,7 @@
 use tokio::io::AsyncWriteExt;
 use zako3_tap_sdk::{
-    AttachedMetadata, AudioCachePolicy, AudioCacheType, AudioMetadata,
-    AudioMetadataSuccessMessage, AudioRequestSuccessMessage, AudioSource, AudioStreamSender,
-    TapError, TapHandler,
+    AttachedMetadata, AudioCachePolicy, AudioCacheType, AudioMetadata, AudioMetadataSuccessMessage,
+    AudioRequestSuccessMessage, AudioSource, AudioStreamSender, TapError, TapHandler,
 };
 
 use crate::demod;
@@ -70,7 +69,12 @@ impl TapHandler for SdrTapHandler {
         let (mode, freq_hz) = parse_source(&source)
             .ok_or_else(|| TapError::Permanent(format!("invalid source: {}", source.as_str())))?;
 
-        tracing::info!(source = source.as_str(), freq_hz, ?mode, "starting SDR stream");
+        tracing::info!(
+            source = source.as_str(),
+            freq_hz,
+            ?mode,
+            "starting SDR stream"
+        );
 
         let host = self.host.clone();
         let port = self.port;
@@ -108,7 +112,9 @@ async fn stream_and_encode(
     use tokio_stream::StreamExt as _;
 
     let mut ffmpeg = tokio::process::Command::new("ffmpeg")
-        .args(["-v", "quiet", "-i", "pipe:0", "-vn", "-c:a", "libopus", "-f", "ogg", "pipe:1"])
+        .args([
+            "-v", "quiet", "-i", "pipe:0", "-vn", "-c:a", "libopus", "-f", "ogg", "pipe:1",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -176,7 +182,8 @@ async fn run_sdr(
         let audio = match mode {
             Mode::Fm => {
                 let demodulated = demod::demodulate_fm(&iq, &mut prev_iq);
-                let deemphasized = demod::deemphasis(&demodulated, SAMPLE_RATE as f32, &mut fm_deemph);
+                let deemphasized =
+                    demod::deemphasis(&demodulated, SAMPLE_RATE as f32, &mut fm_deemph);
                 demod::decimate(&deemphasized, DECIMATE)
             }
             Mode::Am => {
