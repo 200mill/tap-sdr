@@ -2,7 +2,7 @@ use tokio::io::AsyncWriteExt;
 use zako3_tap_sdk::{
     AttachedMetadata, AudioCachePolicy, AudioCacheType, AudioMetadata,
     AudioMetadataSuccessMessage, AudioRequestSuccessMessage, AudioSource, AudioStreamSender,
-    TapError, TapHandler, encode::decode_and_stream,
+    TapError, TapHandler,
 };
 
 use crate::demod;
@@ -68,7 +68,7 @@ impl TapHandler for SdrTapHandler {
         stream: AudioStreamSender,
     ) -> Result<AudioRequestSuccessMessage, TapError> {
         let (mode, freq_hz) = parse_source(&source)
-            .ok_or_else(|| TapError::Fatal(format!("invalid source: {}", source.as_str())))?;
+            .ok_or_else(|| TapError::Permanent(format!("invalid source: {}", source.as_str())))?;
 
         tracing::info!(source = source.as_str(), freq_hz, ?mode, "starting SDR stream");
 
@@ -84,7 +84,7 @@ impl TapHandler for SdrTapHandler {
             }
         });
 
-        decode_and_stream(reader, stream)
+        stream_and_encode(reader, stream)
             .await
             .map_err(|e| TapError::Retriable(e.to_string()))?;
 
@@ -98,6 +98,53 @@ impl TapHandler for SdrTapHandler {
             metadatas: AttachedMetadata::UseCached,
         })
     }
+}
+
+async fn stream_and_encode(
+    reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
+    stream: AudioStreamSender,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::process::Stdio;
+    use tokio_stream::StreamExt as _;
+
+    let mut ffmpeg = tokio::process::Command::new("ffmpeg")
+        .args(["-v", "quiet", "-i", "pipe:0", "-vn", "-c:a", "libopus", "-f", "ogg", "pipe:1"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    let mut ffmpeg_in = ffmpeg.stdin.take().unwrap();
+    let ffmpeg_out = ffmpeg.stdout.take().unwrap();
+
+    let mut reader = reader;
+    tokio::spawn(async move {
+        tokio::io::copy(&mut reader, &mut ffmpeg_in).await.ok();
+    });
+
+    let mut ogg_reader = ogg::reading::async_api::PacketReader::new(ffmpeg_out);
+    let mut frame_index = 0u64;
+
+    while let Some(result) = ogg_reader.next().await {
+        match result {
+            Ok(packet) => {
+                if packet.data.starts_with(b"OpusHead") || packet.data.starts_with(b"OpusTags") {
+                    continue;
+                }
+                let data = bytes::Bytes::copy_from_slice(&packet.data);
+                if !stream.send_opus_frame(frame_index, data).await {
+                    break;
+                }
+                frame_index += 1;
+            }
+            Err(e) => {
+                tracing::warn!("ogg packet read error: {e}");
+                break;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn run_sdr(
