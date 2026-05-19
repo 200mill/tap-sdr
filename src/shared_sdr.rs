@@ -33,6 +33,7 @@ impl SharedSdr {
                 Ok(()) => tracing::warn!("rtl_tcp connection closed"),
                 Err(e) => tracing::error!("rtl_tcp error: {e}"),
             }
+            tracing::info!("reconnecting to rtl_tcp in 2s");
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
         }
     }
@@ -46,11 +47,21 @@ impl SharedSdr {
         client.set_sample_rate(self.sample_rate).await?;
         client.set_frequency(self.center_hz).await?;
         client.set_agc_mode(true).await?;
+        tracing::info!(
+            center_hz = self.center_hz,
+            sample_rate = self.sample_rate,
+            chunk_bytes = CHUNK_BYTES,
+            "rtl_tcp configured and streaming"
+        );
 
         let mut buf = vec![0u8; CHUNK_BYTES];
+        let mut chunks_sent = 0u64;
         loop {
             client.read_samples(&mut buf).await?;
+            let receivers = self.tx.receiver_count();
+            tracing::trace!(chunks_sent, receivers, "I/Q chunk broadcast");
             let _ = self.tx.send(Arc::new(buf.clone()));
+            chunks_sent += 1;
         }
     }
 }

@@ -60,6 +60,7 @@ impl RtlTcpClient {
         &mut self,
         on: bool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        tracing::debug!(on, "set AGC mode");
         self.send_command(0x08, on as u32).await
     }
 

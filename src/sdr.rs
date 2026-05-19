@@ -53,6 +53,7 @@ impl TapHandler for SdrTapHandler {
         &self,
         source: AudioSource,
     ) -> Result<AudioMetadataSuccessMessage, TapError> {
+        tracing::debug!(source = source.as_str(), "metadata request");
         Ok(AudioMetadataSuccessMessage {
             metadatas: vec![AudioMetadata::Title(title_for(&source))],
             cache: AudioCachePolicy {
@@ -95,14 +96,16 @@ impl TapHandler for SdrTapHandler {
         let (mut writer, reader) = tokio::io::duplex(PIPE_CAPACITY);
 
         tokio::spawn(async move {
-            if let Err(e) = run_ddc_demod(center_hz, freq_hz, mode, rx, &mut writer).await {
-                tracing::error!("SDR stream error: {e}");
+            match run_ddc_demod(center_hz, freq_hz, mode, rx, &mut writer).await {
+                Ok(()) => tracing::info!(freq_hz, ?mode, "SDR stream ended"),
+                Err(e) => tracing::error!(freq_hz, ?mode, "SDR stream error: {e}"),
             }
         });
 
         tokio::spawn(async move {
-            if let Err(e) = stream_and_encode(reader, stream).await {
-                tracing::error!("Stream encoder error: {e}");
+            match stream_and_encode(reader, stream).await {
+                Ok(frames) => tracing::info!(frames, "stream encoder finished"),
+                Err(e) => tracing::error!("stream encoder error: {e}"),
             }
         });
 
@@ -120,7 +123,7 @@ impl TapHandler for SdrTapHandler {
 async fn stream_and_encode(
     reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
     stream: AudioStreamSender,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     use std::process::Stdio;
     use tokio_stream::StreamExt as _;
 
@@ -158,6 +161,7 @@ async fn stream_and_encode(
                 }
                 let data = bytes::Bytes::copy_from_slice(&packet.data);
                 if !stream.send_opus_frame(frame_index, data).await {
+                    tracing::debug!(frame_index, "client disconnected, stopping encoder");
                     break;
                 }
                 frame_index += 1;
@@ -169,7 +173,7 @@ async fn stream_and_encode(
         }
     }
 
-    Ok(())
+    Ok(frame_index)
 }
 
 async fn run_ddc_demod(
@@ -207,7 +211,10 @@ async fn run_ddc_demod(
                 tracing::warn!("listener lagged by {n} I/Q chunks");
                 continue;
             }
-            Err(broadcast::error::RecvError::Closed) => break,
+            Err(broadcast::error::RecvError::Closed) => {
+                tracing::debug!("broadcast channel closed, ending DDC/demod loop");
+                break;
+            }
         };
 
         let mut narrow = Vec::with_capacity(raw.len() / 2 / DDC_DECIMATE);
