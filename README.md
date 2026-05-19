@@ -2,6 +2,7 @@
 
 A live SDR (Software Defined Radio) tap for the [Zako3](https://zako.ac) Tap Hub. Connects to an `rtl_tcp` server, demodulates FM/AM radio in real-time, and streams Opus audio to listeners through the hub.
 
+
 ## How it works
 
 ```
@@ -36,6 +37,42 @@ Audio sources are requested as `MODE:FREQ_MHZ`, e.g. `FM:101.1` or `AM:1.080`.
 - `ffmpeg` installed and on `PATH` (used for WAV → Opus encoding)
 - A Zako3 Tap Hub account (`api.zako.ac` or self-hosted)
 - Rust toolchain (for building from source)
+
+## Start with docker compose
+in [docker-compose.yml](./docker-compose.yml)
+```yml
+services:
+  sdr-tap:
+    build: .
+    env_file: .env
+    environment:
+      SDR_TAP_ID: ${SDR_TAP_ID}
+      SDR_API_TOKEN: ${SDR_API_TOKEN}
+      SDR_CENTER_MHZ: ${SDR_CENTER_MHZ:-98.0}
+      TAPHUB_ENDPOINT: ${TAPHUB_ENDPOINT:-api.zako.ac}
+      RTLTCP_HOST: ${RTLTCP_HOST:-localhost}
+      RTLTCP_PORT: ${RTLTCP_PORT:-1234}
+    network_mode: host
+    restart: unless-stopped
+```
+if you need pre-built image, use `ghcr.io/200mill/tap-sdr`
+```diff
+services:
+  sdr-tap:
+-    build: .
++    image: ghcr.io/200mill/tap-sdr
+    env_file: .env
+    environment:
+      SDR_TAP_ID: ${SDR_TAP_ID}
+      SDR_API_TOKEN: ${SDR_API_TOKEN}
+      SDR_CENTER_MHZ: ${SDR_CENTER_MHZ:-98.0}
+      TAPHUB_ENDPOINT: ${TAPHUB_ENDPOINT:-api.zako.ac}
+      RTLTCP_HOST: ${RTLTCP_HOST:-localhost}
+      RTLTCP_PORT: ${RTLTCP_PORT:-1234}
+    network_mode: host
+    restart: unless-stopped
+```
+
 
 ## Configuration
 
