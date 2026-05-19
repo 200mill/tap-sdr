@@ -100,9 +100,11 @@ impl TapHandler for SdrTapHandler {
             }
         });
 
-        stream_and_encode(reader, stream)
-            .await
-            .map_err(|e| TapError::Retriable(e.to_string()))?;
+        tokio::spawn(async move {
+            if let Err(e) = stream_and_encode(reader, stream).await {
+                tracing::error!("Stream encoder error: {e}");
+            }
+        });
 
         Ok(AudioRequestSuccessMessage {
             cache: AudioCachePolicy {
@@ -124,7 +126,13 @@ async fn stream_and_encode(
 
     let mut ffmpeg = tokio::process::Command::new("ffmpeg")
         .args([
-            "-v", "quiet", "-i", "pipe:0", "-vn", "-c:a", "libopus", "-f", "ogg", "pipe:1",
+            "-v", "quiet",
+            "-fflags", "+nobuffer",
+            "-i", "pipe:0", "-vn",
+            "-c:a", "libopus",
+            "-f", "ogg", "-page_duration", "20000",
+            "-flush_packets", "1",
+            "pipe:1",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

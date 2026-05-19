@@ -1,19 +1,4 @@
-networks:
-  sdr:
-
 services:
-  rtltcp:
-    image: docker.io/kosdk/rtl-tcp
-    devices:
-      - /dev/bus/usb:/dev/bus/usb
-    security_opt:
-      - label=disable
-    ports:
-      - "1234:1234"
-    networks:
-      - sdr
-    restart: unless-stopped
-
   sdr-tap:
     build: .
     env_file: .env
@@ -22,10 +7,7 @@ services:
       SDR_API_TOKEN: ${SDR_API_TOKEN}
       SDR_CENTER_MHZ: ${SDR_CENTER_MHZ:-98.0}
       TAPHUB_ENDPOINT: ${TAPHUB_ENDPOINT:-api.zako.ac}
-      RTLTCP_HOST: rtltcp
-      RTLTCP_PORT: "1234"
-    depends_on:
-      - rtltcp
-    networks:
-      - sdr
+      RTLTCP_HOST: ${RTLTCP_HOST:-localhost}
+      RTLTCP_PORT: ${RTLTCP_PORT:-1234}
+    network_mode: host
     restart: unless-stopped
