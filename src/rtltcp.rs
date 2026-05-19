@@ -56,10 +56,28 @@ impl RtlTcpClient {
         self.send_command(0x02, hz).await
     }
 
+    pub async fn set_gain_mode(
+        &mut self,
+        manual: bool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        tracing::debug!(manual, "set tuner gain mode");
+        self.send_command(0x03, manual as u32).await
+    }
+
+    /// Set tuner gain. `tenths_db` is gain in tenths of a dB (e.g. 150 = 15.0 dB).
+    pub async fn set_gain(
+        &mut self,
+        tenths_db: u32,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        tracing::debug!(gain_db = tenths_db as f32 / 10.0, "set tuner gain");
+        self.send_command(0x04, tenths_db).await
+    }
+
     pub async fn set_agc_mode(
         &mut self,
         on: bool,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        tracing::debug!(on, "set AGC mode");
         self.send_command(0x08, on as u32).await
     }
 

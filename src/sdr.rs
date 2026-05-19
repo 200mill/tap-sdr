@@ -14,6 +14,7 @@ const NARROW_RATE: u32 = WIDE_SAMPLE_RATE / DDC_DECIMATE as u32; // 240 000 Hz
 const AUDIO_DECIMATE: usize = 5;
 const AUDIO_RATE: u32 = NARROW_RATE / AUDIO_DECIMATE as u32; // 48 000 Hz
 const PIPE_CAPACITY: usize = 512 * 1024;
+const AUDIO_GAIN: f32 = 0.1; // -20 dB
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Mode {
@@ -53,10 +54,11 @@ impl TapHandler for SdrTapHandler {
         &self,
         source: AudioSource,
     ) -> Result<AudioMetadataSuccessMessage, TapError> {
+        tracing::debug!(source = source.as_str(), "metadata request");
         Ok(AudioMetadataSuccessMessage {
             metadatas: vec![AudioMetadata::Title(title_for(&source))],
             cache: AudioCachePolicy {
-                cache_type: AudioCacheType::ARHash,
+                cache_type: AudioCacheType::None,
                 ttl_seconds: Some(0),
             },
         })
@@ -95,18 +97,22 @@ impl TapHandler for SdrTapHandler {
         let (mut writer, reader) = tokio::io::duplex(PIPE_CAPACITY);
 
         tokio::spawn(async move {
-            if let Err(e) = run_ddc_demod(center_hz, freq_hz, mode, rx, &mut writer).await {
-                tracing::error!("SDR stream error: {e}");
+            match run_ddc_demod(center_hz, freq_hz, mode, rx, &mut writer).await {
+                Ok(()) => tracing::info!(freq_hz, ?mode, "SDR stream ended"),
+                Err(e) => tracing::error!(freq_hz, ?mode, "SDR stream error: {e}"),
             }
         });
 
-        stream_and_encode(reader, stream)
-            .await
-            .map_err(|e| TapError::Retriable(e.to_string()))?;
+        tokio::spawn(async move {
+            match stream_and_encode(reader, stream).await {
+                Ok(frames) => tracing::info!(frames, "stream encoder finished"),
+                Err(e) => tracing::error!("stream encoder error: {e}"),
+            }
+        });
 
         Ok(AudioRequestSuccessMessage {
             cache: AudioCachePolicy {
-                cache_type: AudioCacheType::ARHash,
+                cache_type: AudioCacheType::None,
                 ttl_seconds: Some(0),
             },
             duration_secs: None,
@@ -118,13 +124,28 @@ impl TapHandler for SdrTapHandler {
 async fn stream_and_encode(
     reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
     stream: AudioStreamSender,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     use std::process::Stdio;
     use tokio_stream::StreamExt as _;
 
     let mut ffmpeg = tokio::process::Command::new("ffmpeg")
         .args([
-            "-v", "quiet", "-i", "pipe:0", "-vn", "-c:a", "libopus", "-f", "ogg", "pipe:1",
+            "-v",
+            "quiet",
+            "-fflags",
+            "+nobuffer",
+            "-i",
+            "pipe:0",
+            "-vn",
+            "-c:a",
+            "libopus",
+            "-f",
+            "ogg",
+            "-page_duration",
+            "20000",
+            "-flush_packets",
+            "1",
+            "pipe:1",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -150,6 +171,7 @@ async fn stream_and_encode(
                 }
                 let data = bytes::Bytes::copy_from_slice(&packet.data);
                 if !stream.send_opus_frame(frame_index, data).await {
+                    tracing::debug!(frame_index, "client disconnected, stopping encoder");
                     break;
                 }
                 frame_index += 1;
@@ -161,7 +183,7 @@ async fn stream_and_encode(
         }
     }
 
-    Ok(())
+    Ok(frame_index)
 }
 
 async fn run_ddc_demod(
@@ -199,7 +221,10 @@ async fn run_ddc_demod(
                 tracing::warn!("listener lagged by {n} I/Q chunks");
                 continue;
             }
-            Err(broadcast::error::RecvError::Closed) => break,
+            Err(broadcast::error::RecvError::Closed) => {
+                tracing::debug!("broadcast channel closed, ending DDC/demod loop");
+                break;
+            }
         };
 
         let mut narrow = Vec::with_capacity(raw.len() / 2 / DDC_DECIMATE);
@@ -252,6 +277,7 @@ async fn run_ddc_demod(
             }
         };
 
+        let audio: Vec<f32> = audio.iter().map(|s| s * AUDIO_GAIN).collect();
         let pcm = demod::pcm_to_bytes(&audio);
         writer.write_all(&pcm).await?;
     }
