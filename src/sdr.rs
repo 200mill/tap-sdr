@@ -56,7 +56,7 @@ impl TapHandler for SdrTapHandler {
         Ok(AudioMetadataSuccessMessage {
             metadatas: vec![AudioMetadata::Title(title_for(&source))],
             cache: AudioCachePolicy {
-                cache_type: AudioCacheType::ARHash,
+                cache_type: AudioCacheType::None,
                 ttl_seconds: Some(0),
             },
         })
@@ -108,7 +108,7 @@ impl TapHandler for SdrTapHandler {
 
         Ok(AudioRequestSuccessMessage {
             cache: AudioCachePolicy {
-                cache_type: AudioCacheType::ARHash,
+                cache_type: AudioCacheType::None,
                 ttl_seconds: Some(0),
             },
             duration_secs: None,
