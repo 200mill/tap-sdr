@@ -31,3 +31,7 @@ tracing-subscriber = { workspace = true }
 ogg = { workspace = true }
 tokio-stream = { workspace = true }
 zako3-tap-sdk = { workspace = true }
+
+[patch.crates-io.protofish2]
+git = "https://github.com/mincomk/protofish2-rs"
+branch = "main"

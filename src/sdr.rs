@@ -1,16 +1,18 @@
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::broadcast;
 use zako3_tap_sdk::{
     AttachedMetadata, AudioCachePolicy, AudioCacheType, AudioMetadata, AudioMetadataSuccessMessage,
     AudioRequestSuccessMessage, AudioSource, AudioStreamSender, TapError, TapHandler,
 };
 
 use crate::demod;
-use crate::rtltcp::RtlTcpClient;
+use crate::shared_sdr::{SharedSdr, WIDE_SAMPLE_RATE};
 
-const SAMPLE_RATE: u32 = 240_000;
-const AUDIO_RATE: u32 = 48_000;
-const DECIMATE: usize = (SAMPLE_RATE / AUDIO_RATE) as usize; // 5
-const IQ_CHUNK_BYTES: usize = SAMPLE_RATE as usize / 10 * 2; // 100 ms of I/Q bytes
+const DDC_DECIMATE: usize = 10;
+const NARROW_RATE: u32 = WIDE_SAMPLE_RATE / DDC_DECIMATE as u32; // 240 000 Hz
+const AUDIO_DECIMATE: usize = 5;
+const AUDIO_RATE: u32 = NARROW_RATE / AUDIO_DECIMATE as u32; // 48 000 Hz
 const PIPE_CAPACITY: usize = 512 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -42,8 +44,7 @@ fn title_for(source: &AudioSource) -> String {
 }
 
 pub struct SdrTapHandler {
-    pub host: String,
-    pub port: u16,
+    pub sdr: Arc<SharedSdr>,
 }
 
 #[async_trait::async_trait]
@@ -69,22 +70,33 @@ impl TapHandler for SdrTapHandler {
         let (mode, freq_hz) = parse_source(&source)
             .ok_or_else(|| TapError::Permanent(format!("invalid source: {}", source.as_str())))?;
 
+        let center_hz = self.sdr.center_hz;
+        let half_bw = WIDE_SAMPLE_RATE as i64 / 2 - 150_000;
+        let offset = freq_hz as i64 - center_hz as i64;
+        if offset.abs() > half_bw {
+            return Err(TapError::Permanent(format!(
+                "{:.3} MHz is outside the tuned bandwidth (center {:.3} MHz ± {:.3} MHz)",
+                freq_hz as f64 / 1e6,
+                center_hz as f64 / 1e6,
+                half_bw as f64 / 1e6,
+            )));
+        }
+
         tracing::info!(
             source = source.as_str(),
             freq_hz,
             ?mode,
+            center_hz,
+            offset,
             "starting SDR stream"
         );
 
-        let host = self.host.clone();
-        let port = self.port;
-
-        // Async pipe: SDR decoder writes WAV, decode_and_stream reads it
+        let rx = self.sdr.subscribe();
         let (mut writer, reader) = tokio::io::duplex(PIPE_CAPACITY);
 
         tokio::spawn(async move {
-            if let Err(e) = run_sdr(host, port, freq_hz, mode, &mut writer).await {
-                tracing::error!("SDR task ended: {e}");
+            if let Err(e) = run_ddc_demod(center_hz, freq_hz, mode, rx, &mut writer).await {
+                tracing::error!("SDR stream error: {e}");
             }
         });
 
@@ -93,7 +105,6 @@ impl TapHandler for SdrTapHandler {
             .map_err(|e| TapError::Retriable(e.to_string()))?;
 
         Ok(AudioRequestSuccessMessage {
-            // Live audio — no caching
             cache: AudioCachePolicy {
                 cache_type: AudioCacheType::ARHash,
                 ttl_seconds: Some(0),
@@ -153,46 +164,97 @@ async fn stream_and_encode(
     Ok(())
 }
 
-async fn run_sdr(
-    host: String,
-    port: u16,
+async fn run_ddc_demod(
+    center_hz: u32,
     freq_hz: u32,
     mode: Mode,
+    mut rx: broadcast::Receiver<Arc<Vec<u8>>>,
     writer: &mut (impl AsyncWriteExt + Unpin),
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let mut client = RtlTcpClient::connect(&host, port).await?;
-    client.set_sample_rate(SAMPLE_RATE).await?;
-    client.set_frequency(freq_hz).await?;
-    client.set_agc_mode(true).await?;
+    // NCO: rotates by exp(-j·2π·offset·n/Fs) to shift requested station to DC
+    let offset_hz = freq_hz as i64 - center_hz as i64;
+    let phase_step = -2.0 * std::f64::consts::PI * offset_hz as f64 / WIDE_SAMPLE_RATE as f64;
+    let step_cos = phase_step.cos() as f32;
+    let step_sin = phase_step.sin() as f32;
+    let mut osc_i = 1.0f32;
+    let mut osc_q = 0.0f32;
+    let mut osc_ticks = 0u32;
 
-    // Write streaming WAV header (data size = 0xFFFF_FFFF tells ffmpeg to read until EOF)
-    let header = demod::streaming_wav_header(AUDIO_RATE, 1);
-    writer.write_all(&header).await?;
+    // Boxcar accumulator for DDC decimation (2.4 MHz → 240 kHz)
+    let mut acc_i = 0.0f32;
+    let mut acc_q = 0.0f32;
+    let mut acc_count = 0usize;
 
-    let mut raw = vec![0u8; IQ_CHUNK_BYTES];
     let mut prev_iq = (1.0f32, 0.0f32);
     let mut fm_deemph = 0.0f32;
     let mut am_dc = 0.0f32;
 
-    loop {
-        client.read_samples(&mut raw).await?;
+    let header = demod::streaming_wav_header(AUDIO_RATE, 1);
+    writer.write_all(&header).await?;
 
-        let iq = demod::convert_iq(&raw);
+    loop {
+        let raw = match rx.recv().await {
+            Ok(chunk) => chunk,
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!("listener lagged by {n} I/Q chunks");
+                continue;
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        };
+
+        let mut narrow = Vec::with_capacity(raw.len() / 2 / DDC_DECIMATE);
+
+        for c in raw.chunks_exact(2) {
+            let si = (c[0] as f32 - 127.5) / 127.5;
+            let sq = (c[1] as f32 - 127.5) / 127.5;
+
+            // Frequency shift
+            let shifted_i = si * osc_i - sq * osc_q;
+            let shifted_q = si * osc_q + sq * osc_i;
+
+            // Advance NCO
+            let new_i = osc_i * step_cos - osc_q * step_sin;
+            let new_q = osc_i * step_sin + osc_q * step_cos;
+            osc_i = new_i;
+            osc_q = new_q;
+
+            // Periodic renormalization to prevent magnitude drift
+            osc_ticks += 1;
+            if osc_ticks == 65536 {
+                let mag = (osc_i * osc_i + osc_q * osc_q).sqrt();
+                osc_i /= mag;
+                osc_q /= mag;
+                osc_ticks = 0;
+            }
+
+            // Boxcar accumulate and dump
+            acc_i += shifted_i;
+            acc_q += shifted_q;
+            acc_count += 1;
+            if acc_count == DDC_DECIMATE {
+                narrow.push((acc_i / DDC_DECIMATE as f32, acc_q / DDC_DECIMATE as f32));
+                acc_i = 0.0;
+                acc_q = 0.0;
+                acc_count = 0;
+            }
+        }
 
         let audio = match mode {
             Mode::Fm => {
-                let demodulated = demod::demodulate_fm(&iq, &mut prev_iq);
+                let demodulated = demod::demodulate_fm(&narrow, &mut prev_iq);
                 let deemphasized =
-                    demod::deemphasis(&demodulated, SAMPLE_RATE as f32, &mut fm_deemph);
-                demod::decimate(&deemphasized, DECIMATE)
+                    demod::deemphasis(&demodulated, NARROW_RATE as f32, &mut fm_deemph);
+                demod::decimate(&deemphasized, AUDIO_DECIMATE)
             }
             Mode::Am => {
-                let demodulated = demod::demodulate_am(&iq, &mut am_dc);
-                demod::decimate(&demodulated, DECIMATE)
+                let demodulated = demod::demodulate_am(&narrow, &mut am_dc);
+                demod::decimate(&demodulated, AUDIO_DECIMATE)
             }
         };
 
         let pcm = demod::pcm_to_bytes(&audio);
         writer.write_all(&pcm).await?;
     }
+
+    Ok(())
 }

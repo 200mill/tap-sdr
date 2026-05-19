@@ -800,8 +800,7 @@ dependencies = [
 [[package]]
 name = "protofish2"
 version = "0.6.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e5d13e8d88643547319c1680bd14101bebf4386ed9c78fd4005b1c5753c5382"
+source = "git+https://github.com/mincomk/protofish2-rs?branch=main#3bb6388736c86377b764b5cde7d2fb6273ea2079"
 dependencies = [
  "bytes",
  "dashmap",

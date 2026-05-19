@@ -4,6 +4,7 @@ use zako3_tap_sdk::tap;
 pub mod demod;
 pub mod rtltcp;
 pub mod sdr;
+pub mod shared_sdr;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -13,8 +14,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .ok();
     tracing_subscriber::fmt::init();
 
-    let tap_id = std::env::var("SDR_TAP_ID").unwrap();
-    let api_token = std::env::var("SDR_API_TOKEN").unwrap();
+    let tap_id = std::env::var("SDR_TAP_ID").expect("SDR_TAP_ID is required");
+    let api_token = std::env::var("SDR_API_TOKEN").expect("SDR_API_TOKEN is required");
     let hub = std::env::var("TAPHUB_ENDPOINT").unwrap_or_else(|_| "api.zako.ac".to_string());
     let server_name = std::env::var("TAPHUB_SERVER_NAME").ok();
     let healthcheck_port = std::env::var("TAP_HEALTHCHECK_PORT").ok().map(|v| {
@@ -26,11 +27,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .unwrap_or_else(|_| "1234".to_string())
         .parse::<u16>()
         .expect("RTLTCP_PORT must be a valid port number");
+    let center_hz = std::env::var("SDR_CENTER_MHZ")
+        .map(|v| {
+            (v.parse::<f64>().expect("SDR_CENTER_MHZ must be a number") * 1_000_000.0).round()
+                as u32
+        })
+        .expect("SDR_CENTER_MHZ is required (e.g. SDR_CENTER_MHZ=98.0)");
 
-    let handler = sdr::SdrTapHandler {
-        host: rtltcp_host,
-        port: rtltcp_port,
-    };
+    let shared_sdr = shared_sdr::SharedSdr::new(center_hz);
+
+    let sdr_task = Arc::clone(&shared_sdr);
+    tokio::spawn(async move {
+        sdr_task.run(rtltcp_host, rtltcp_port).await;
+    });
+
+    let handler = sdr::SdrTapHandler { sdr: shared_sdr };
 
     let mut builder = tap()
         .hub(&hub)
