@@ -39,8 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let source: Box<dyn sdr_source::SdrSource> = match driver.as_str() {
         "rtltcp" => {
-            let host =
-                std::env::var("RTLTCP_HOST").unwrap_or_else(|_| "localhost".to_string());
+            let host = std::env::var("RTLTCP_HOST").unwrap_or_else(|_| "localhost".to_string());
             let port = std::env::var("RTLTCP_PORT")
                 .unwrap_or_else(|_| "1234".to_string())
                 .parse::<u16>()

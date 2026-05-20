@@ -103,7 +103,12 @@ pub struct RtlTcpSource {
 
 impl RtlTcpSource {
     pub fn new(host: String, port: u16) -> Self {
-        Self { host, port, client: None, raw_buf: Vec::new() }
+        Self {
+            host,
+            port,
+            client: None,
+            raw_buf: Vec::new(),
+        }
     }
 }
 
