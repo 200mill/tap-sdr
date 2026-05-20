@@ -192,7 +192,7 @@ async fn run_ddc_demod(
     center_hz: u32,
     freq_hz: u32,
     mode: Mode,
-    mut rx: broadcast::Receiver<Arc<Vec<u8>>>,
+    mut rx: broadcast::Receiver<Arc<Vec<f32>>>,
     writer: &mut (impl AsyncWriteExt + Unpin),
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // NCO: rotates by exp(-j·2π·offset·n/Fs) to shift requested station to DC
@@ -232,8 +232,8 @@ async fn run_ddc_demod(
         let mut narrow = Vec::with_capacity(raw.len() / 2 / DDC_DECIMATE);
 
         for c in raw.chunks_exact(2) {
-            let si = (c[0] as f32 - 127.5) / 127.5;
-            let sq = (c[1] as f32 - 127.5) / 127.5;
+            let si = c[0];
+            let sq = c[1];
 
             // Frequency shift
             let shifted_i = si * osc_i - sq * osc_q;

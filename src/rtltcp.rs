@@ -1,5 +1,8 @@
+use async_trait::async_trait;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+use crate::sdr_source::{SdrConfig, SdrSource};
 
 pub struct RtlTcpClient {
     stream: TcpStream,
@@ -87,6 +90,53 @@ impl RtlTcpClient {
         buf: &mut [u8],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.stream.read_exact(buf).await?;
+        Ok(())
+    }
+}
+
+pub struct RtlTcpSource {
+    host: String,
+    port: u16,
+    client: Option<RtlTcpClient>,
+    raw_buf: Vec<u8>,
+}
+
+impl RtlTcpSource {
+    pub fn new(host: String, port: u16) -> Self {
+        Self { host, port, client: None, raw_buf: Vec::new() }
+    }
+}
+
+#[async_trait]
+impl SdrSource for RtlTcpSource {
+    async fn configure(
+        &mut self,
+        cfg: &SdrConfig,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let mut client = RtlTcpClient::connect(&self.host, self.port).await?;
+        client.set_sample_rate(cfg.sample_rate).await?;
+        client.set_frequency(cfg.center_hz).await?;
+        client.set_gain_mode(true).await?;
+        client.set_gain((cfg.gain_db * 10.0).round() as u32).await?;
+        client.set_agc_mode(false).await?;
+        self.client = Some(client);
+        Ok(())
+    }
+
+    async fn read_chunk(
+        &mut self,
+        buf: &mut Vec<f32>,
+        n_samples: usize,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let client = self.client.as_mut().ok_or("rtl_tcp not configured")?;
+        let raw_len = n_samples * 2;
+        self.raw_buf.resize(raw_len, 0u8);
+        client.read_samples(&mut self.raw_buf).await?;
+        buf.clear();
+        buf.reserve(raw_len);
+        for &b in &self.raw_buf {
+            buf.push((b as f32 - 127.5) / 127.5);
+        }
         Ok(())
     }
 }

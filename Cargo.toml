@@ -20,6 +20,10 @@ name = "sdr-tap"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+soapy = ["dep:soapysdr", "dep:num-complex"]
+
 [dependencies]
 async-trait = { workspace = true }
 bytes = { workspace = true }
@@ -31,6 +35,8 @@ tracing-subscriber = { workspace = true }
 ogg = { workspace = true }
 tokio-stream = { workspace = true }
 zako3-tap-sdk = { workspace = true }
+soapysdr = { version = "0.3", optional = true }
+num-complex = { version = "0.4", optional = true }
 
 [patch.crates-io.protofish2]
 git = "https://github.com/mincomk/protofish2-rs"
