@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use zako3_tap_sdk::{
     AttachedMetadata, AudioCachePolicy, AudioCacheType, AudioMetadata, AudioMetadataSuccessMessage,
     AudioRequestSuccessMessage, AudioSource, AudioStreamSender, TapError, TapHandler,
@@ -72,16 +72,13 @@ impl TapHandler for SdrTapHandler {
         let (mode, freq_hz) = parse_source(&source)
             .ok_or_else(|| TapError::Permanent(format!("invalid source: {}", source.as_str())))?;
 
-        let center_hz = self.sdr.center_hz;
+        let mut center_hz = self.sdr.center_hz();
         let half_bw = WIDE_SAMPLE_RATE as i64 / 2 - 150_000;
         let offset = freq_hz as i64 - center_hz as i64;
         if offset.abs() > half_bw {
-            return Err(TapError::Permanent(format!(
-                "{:.3} MHz is outside the tuned bandwidth (center {:.3} MHz ± {:.3} MHz)",
-                freq_hz as f64 / 1e6,
-                center_hz as f64 / 1e6,
-                half_bw as f64 / 1e6,
-            )));
+            tracing::info!(freq_hz, center_hz, "frequency out of range, retuning");
+            self.sdr.retune(freq_hz).await;
+            center_hz = self.sdr.center_hz();
         }
 
         tracing::info!(
@@ -94,10 +91,11 @@ impl TapHandler for SdrTapHandler {
         );
 
         let rx = self.sdr.subscribe();
+        let retune_rx = self.sdr.actual_center_rx();
         let (mut writer, reader) = tokio::io::duplex(PIPE_CAPACITY);
 
         tokio::spawn(async move {
-            match run_ddc_demod(center_hz, freq_hz, mode, rx, &mut writer).await {
+            match run_ddc_demod(center_hz, freq_hz, mode, rx, &mut writer, retune_rx).await {
                 Ok(()) => tracing::info!(freq_hz, ?mode, "SDR stream ended"),
                 Err(e) => tracing::error!(freq_hz, ?mode, "SDR stream error: {e}"),
             }
@@ -194,12 +192,13 @@ async fn run_ddc_demod(
     mode: Mode,
     mut rx: broadcast::Receiver<Arc<Vec<u8>>>,
     writer: &mut (impl AsyncWriteExt + Unpin),
+    mut retune_rx: watch::Receiver<u32>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // NCO: rotates by exp(-j·2π·offset·n/Fs) to shift requested station to DC
     let offset_hz = freq_hz as i64 - center_hz as i64;
     let phase_step = -2.0 * std::f64::consts::PI * offset_hz as f64 / WIDE_SAMPLE_RATE as f64;
-    let step_cos = phase_step.cos() as f32;
-    let step_sin = phase_step.sin() as f32;
+    let mut step_cos = phase_step.cos() as f32;
+    let mut step_sin = phase_step.sin() as f32;
     let mut osc_i = 1.0f32;
     let mut osc_q = 0.0f32;
     let mut osc_ticks = 0u32;
@@ -217,15 +216,29 @@ async fn run_ddc_demod(
     writer.write_all(&header).await?;
 
     loop {
-        let raw = match rx.recv().await {
-            Ok(chunk) => chunk,
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::warn!("listener lagged by {n} I/Q chunks");
+        let raw: Arc<Vec<u8>> = tokio::select! {
+            result = rx.recv() => match result {
+                Ok(chunk) => chunk,
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("listener lagged by {n} I/Q chunks");
+                    continue;
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    tracing::debug!("broadcast channel closed, ending DDC/demod loop");
+                    break;
+                }
+            },
+            _ = retune_rx.changed() => {
+                let new_center = *retune_rx.borrow_and_update();
+                let new_offset = freq_hz as i64 - new_center as i64;
+                let ps = -2.0 * std::f64::consts::PI * new_offset as f64 / WIDE_SAMPLE_RATE as f64;
+                step_cos = ps.cos() as f32;
+                step_sin = ps.sin() as f32;
+                osc_i = 1.0;
+                osc_q = 0.0;
+                osc_ticks = 0;
+                tracing::info!(new_center, freq_hz, "DDC NCO recomputed after retune");
                 continue;
-            }
-            Err(broadcast::error::RecvError::Closed) => {
-                tracing::debug!("broadcast channel closed, ending DDC/demod loop");
-                break;
             }
         };
 
