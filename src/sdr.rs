@@ -96,8 +96,8 @@ impl TapHandler for SdrTapHandler {
 
         tokio::spawn(async move {
             match run_ddc_demod(center_hz, freq_hz, mode, rx, &mut writer, retune_rx).await {
-                Ok(()) => tracing::info!(freq_hz, ?mode, "SDR stream ended"),
-                Err(e) => tracing::error!(freq_hz, ?mode, "SDR stream error: {e}"),
+                Ok(()) => tracing::info!(freq_hz, ?mode, "DDC/demod task ended cleanly"),
+                Err(e) => tracing::error!(freq_hz, ?mode, "DDC/demod task error: {e:?}"),
             }
         });
 
@@ -106,7 +106,7 @@ impl TapHandler for SdrTapHandler {
         tokio::spawn(async move {
             match stream_and_encode(reader, stream).await {
                 Ok(frames) => tracing::info!(frames, "stream encoder finished"),
-                Err(e) => tracing::error!("stream encoder error: {e}"),
+                Err(e) => tracing::error!("stream encoder error: {e:?}"),
             }
         });
 
@@ -126,12 +126,15 @@ async fn stream_and_encode(
     stream: AudioStreamSender,
 ) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
     use std::process::Stdio;
+    use std::time::Instant;
+    use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio_stream::StreamExt as _;
 
+    let spawn_started = Instant::now();
     let mut ffmpeg = tokio::process::Command::new("ffmpeg")
         .args([
-            "-v",
-            "quiet",
+            "-loglevel",
+            "warning",
             "-fflags",
             "+nobuffer",
             "-i",
@@ -142,46 +145,90 @@ async fn stream_and_encode(
             "-f",
             "ogg",
             "-page_duration",
-            "20000",
+            "1",
             "-flush_packets",
             "1",
             "pipe:1",
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()?;
 
     let mut ffmpeg_in = ffmpeg.stdin.take().unwrap();
     let ffmpeg_out = ffmpeg.stdout.take().unwrap();
+    let ffmpeg_err = ffmpeg.stderr.take().unwrap();
+
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(ffmpeg_err).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => tracing::warn!(target: "ffmpeg.stderr", "{line}"),
+                Ok(None) => {
+                    tracing::info!(target: "ffmpeg.stderr", "ffmpeg stderr closed");
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(target: "ffmpeg.stderr", "read error: {e}");
+                    break;
+                }
+            }
+        }
+    });
 
     let mut reader = reader;
     tokio::spawn(async move {
-        tokio::io::copy(&mut reader, &mut ffmpeg_in).await.ok();
+        match tokio::io::copy(&mut reader, &mut ffmpeg_in).await {
+            Ok(n) => tracing::info!(bytes = n, "PCM→ffmpeg copy ended"),
+            Err(e) => tracing::warn!("PCM→ffmpeg copy error: {e:?}"),
+        }
     });
 
     let mut ogg_reader = ogg::reading::async_api::PacketReader::new(ffmpeg_out);
     let mut frame_index = 0u64;
+    let mut first_packet = true;
 
-    while let Some(result) = ogg_reader.next().await {
-        match result {
-            Ok(packet) => {
+    let exit_reason: &'static str = loop {
+        match ogg_reader.next().await {
+            Some(Ok(packet)) => {
                 if packet.data.starts_with(b"OpusHead") || packet.data.starts_with(b"OpusTags") {
                     continue;
                 }
+                if first_packet {
+                    tracing::info!(
+                        elapsed_ms = spawn_started.elapsed().as_millis() as u64,
+                        bytes = packet.data.len(),
+                        "first opus packet from ffmpeg"
+                    );
+                    first_packet = false;
+                }
                 let data = bytes::Bytes::copy_from_slice(&packet.data);
                 if !stream.send_opus_frame(frame_index, data).await {
-                    tracing::debug!(frame_index, "client disconnected, stopping encoder");
-                    break;
+                    break "hub_disconnected";
                 }
                 frame_index += 1;
+                if frame_index.is_multiple_of(250) {
+                    tracing::debug!(
+                        frame_index,
+                        elapsed_ms = spawn_started.elapsed().as_millis() as u64,
+                        "encode heartbeat"
+                    );
+                }
             }
-            Err(e) => {
-                tracing::warn!("ogg packet read error: {e}");
-                break;
+            Some(Err(e)) => {
+                tracing::warn!("ogg packet read error: {e:?}");
+                break "ogg_read_error";
             }
+            None => break "ffmpeg_eof",
         }
-    }
+    };
+
+    tracing::info!(
+        frame_index,
+        elapsed_ms = spawn_started.elapsed().as_millis() as u64,
+        exit_reason,
+        "encoder loop exited"
+    );
 
     Ok(frame_index)
 }

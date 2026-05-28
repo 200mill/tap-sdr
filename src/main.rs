@@ -45,6 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let mut builder = tap()
         .hub(&hub)
+        .transport(zako3_tap_sdk::Transport::Protofish3)
         .tap_id(&tap_id)
         .friendly_name("SDR Live Tap")
         .api_token(&api_token)
