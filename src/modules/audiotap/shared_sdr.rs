@@ -1,10 +1,12 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, broadcast, watch};
 
-use crate::rtltcp::RtlTcpClient;
+use super::rtltcp::RtlTcpClient;
 
 pub const WIDE_SAMPLE_RATE: u32 = 2_400_000;
+pub const DEFAULT_GAIN_TENTHS_DB: u32 = 150; // 15.0 dB
 const CHUNK_BYTES: usize = WIDE_SAMPLE_RATE as usize / 10 * 2; // 100 ms of I/Q bytes
 const RING_CAPACITY: usize = 20; // 2 s of staged I/Q data
 
@@ -51,9 +53,13 @@ impl IqBuffer {
 pub struct SharedSdr {
     desired_tx: watch::Sender<u32>,
     actual_tx: watch::Sender<u32>,
+    gain_tx: watch::Sender<u32>,
     pub sample_rate: u32,
     tx: broadcast::Sender<Arc<Vec<u8>>>,
     iq_buffer: Arc<IqBuffer>,
+    chunks_pushed: AtomicU64,
+    retunes: AtomicU64,
+    hub_connected: Arc<AtomicU64>, // 0 = no, non-zero = connected since this epoch ms
 }
 
 impl SharedSdr {
@@ -61,17 +67,46 @@ impl SharedSdr {
         let (tx, _) = broadcast::channel(16);
         let (desired_tx, _) = watch::channel(center_hz);
         let (actual_tx, _) = watch::channel(center_hz);
+        let (gain_tx, _) = watch::channel(DEFAULT_GAIN_TENTHS_DB);
         Arc::new(Self {
             desired_tx,
             actual_tx,
+            gain_tx,
             sample_rate: WIDE_SAMPLE_RATE,
             tx,
             iq_buffer: IqBuffer::new(),
+            chunks_pushed: AtomicU64::new(0),
+            retunes: AtomicU64::new(0),
+            hub_connected: Arc::new(AtomicU64::new(0)),
         })
     }
 
     pub fn center_hz(&self) -> u32 {
         *self.actual_tx.borrow()
+    }
+
+    pub fn current_gain_tenths_db(&self) -> u32 {
+        *self.gain_tx.borrow()
+    }
+
+    pub fn chunks_pushed(&self) -> u64 {
+        self.chunks_pushed.load(Ordering::Relaxed)
+    }
+
+    pub fn retunes(&self) -> u64 {
+        self.retunes.load(Ordering::Relaxed)
+    }
+
+    pub fn listener_count(&self) -> usize {
+        self.tx.receiver_count()
+    }
+
+    pub fn hub_connected_handle(&self) -> Arc<AtomicU64> {
+        self.hub_connected.clone()
+    }
+
+    pub fn hub_connected(&self) -> bool {
+        self.hub_connected.load(Ordering::Relaxed) != 0
     }
 
     /// Returns a receiver that fires whenever the hardware center frequency is confirmed changed.
@@ -94,6 +129,11 @@ impl SharedSdr {
             }
         })
         .await;
+    }
+
+    /// Request a tuner gain change (in tenths of a dB, e.g. 150 = 15.0 dB).
+    pub fn set_gain(&self, tenths_db: u32) {
+        self.gain_tx.send(tenths_db).ok();
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Vec<u8>>> {
@@ -127,15 +167,17 @@ impl SharedSdr {
         host: &str,
         port: u16,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        // Use current desired center so reconnects honour the latest retune.
+        // Use current desired center / gain so reconnects honour latest values.
         let mut desired_rx = self.desired_tx.subscribe();
+        let mut gain_rx = self.gain_tx.subscribe();
         let center_hz = *desired_rx.borrow_and_update();
+        let gain = *gain_rx.borrow_and_update();
 
         let mut client = RtlTcpClient::connect(host, port).await?;
         client.set_sample_rate(self.sample_rate).await?;
         client.set_frequency(center_hz).await?;
         client.set_gain_mode(true).await?;
-        client.set_gain(150).await?; // 15.0 dB
+        client.set_gain(gain).await?;
         client.set_agc_mode(false).await?;
         self.actual_tx.send(center_hz).ok();
 
@@ -143,25 +185,31 @@ impl SharedSdr {
             center_hz,
             sample_rate = self.sample_rate,
             chunk_bytes = CHUNK_BYTES,
-            gain_db = 15.0,
+            gain_db = gain as f32 / 10.0,
             "rtl_tcp configured and streaming"
         );
 
         let mut buf = vec![0u8; CHUNK_BYTES];
-        let mut chunks_sent = 0u64;
         loop {
             client.read_samples(&mut buf).await?;
             let receivers = self.tx.receiver_count();
+            let chunks_sent = self.chunks_pushed.fetch_add(1, Ordering::Relaxed) + 1;
             tracing::trace!(chunks_sent, receivers, "I/Q chunk pushed to ring buffer");
             self.iq_buffer.push(Arc::new(buf.clone()));
-            chunks_sent += 1;
 
             // Check for a pending retune between reads (never mid-buffer).
             if desired_rx.has_changed().unwrap_or(false) {
                 let new_hz = *desired_rx.borrow_and_update();
                 client.set_frequency(new_hz).await?;
                 self.actual_tx.send(new_hz).ok();
+                self.retunes.fetch_add(1, Ordering::Relaxed);
                 tracing::info!(new_hz, "retuned center frequency");
+            }
+
+            if gain_rx.has_changed().unwrap_or(false) {
+                let new_gain = *gain_rx.borrow_and_update();
+                client.set_gain(new_gain).await?;
+                tracing::info!(gain_db = new_gain as f32 / 10.0, "applied new tuner gain");
             }
         }
     }

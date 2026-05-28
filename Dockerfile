@@ -17,4 +17,6 @@ RUN apt-get update && apt-get install -y ffmpeg ca-certificates && rm -rf /var/l
 
 COPY --from=builder /build/target/release/sdr-tap /usr/local/bin/sdr-tap
 
-CMD ["sdr-tap"]
+EXPOSE 7871
+
+CMD ["sdr-tap", "audiotap"]

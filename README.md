@@ -76,18 +76,21 @@ services:
 
 ## Configuration
 
-All configuration is via environment variables. A `.env` file is supported.
+The binary now uses a clap-based CLI shaped after [airframesio/xng](https://github.com/airframesio/xng). Every flag also accepts the original environment variable, so existing `.env` files and the published `docker-compose.yml` keep working unchanged.
 
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `SDR_TAP_ID` | yes | — | Unique tap identifier |
-| `SDR_API_TOKEN` | yes | — | Authentication token for the hub |
-| `SDR_CENTER_MHZ` | yes | — | Center frequency to tune (e.g. `98.0`) |
-| `TAPHUB_ENDPOINT` | no | `api.zako.ac` | Tap Hub address |
-| `TAPHUB_SERVER_NAME` | no | — | TLS SNI override |
-| `TAP_HEALTHCHECK_PORT` | no | — | HTTP health check port (for liveness probes) |
-| `RTLTCP_HOST` | no | `localhost` | rtl_tcp server host |
-| `RTLTCP_PORT` | no | `1234` | rtl_tcp server port |
+| Flag | Env variable | Required | Default | Description |
+|---|---|---|---|---|
+| `--tap-id` | `SDR_TAP_ID` | yes | — | Unique tap identifier |
+| `--api-token` | `SDR_API_TOKEN` | yes | — | Authentication token for the hub |
+| `--center-mhz` | `SDR_CENTER_MHZ` | yes | — | Centre frequency to tune (e.g. `98.0`) |
+| `--hub` | `TAPHUB_ENDPOINT` | no | `api.zako.ac` | Tap Hub address |
+| `--server-name` | `TAPHUB_SERVER_NAME` | no | — | TLS SNI override |
+| `--healthcheck-port` | `TAP_HEALTHCHECK_PORT` | no | — | Optional standalone Zako3 SDK liveness port |
+| `--rtltcp-host` | `RTLTCP_HOST` | no | `localhost` | rtl_tcp server host |
+| `--rtltcp-port` | `RTLTCP_PORT` | no | `1234` | rtl_tcp server port |
+| `--listen-host` | `TAP_LISTEN_HOST` | no | `127.0.0.1` | HTTP control/stats API bind host |
+| `--listen-port` | `TAP_LISTEN_PORT` | no | `7871` | HTTP control/stats API port |
+| `--disable-cross-site` | — | no | off | Restrict CORS to the bound listener |
 
 Copy `.env.example` to `.env` and fill in the required values.
 
@@ -102,10 +105,35 @@ rtl_tcp -a 0.0.0.0 -p 1234
 Then run the tap:
 
 ```sh
-SDR_TAP_ID=my-sdr-tap SDR_API_TOKEN=secret SDR_CENTER_MHZ=98.0 cargo run --release
+SDR_TAP_ID=my-sdr-tap SDR_API_TOKEN=secret SDR_CENTER_MHZ=98.0 cargo run --release -- audiotap
 ```
 
-Once connected, listeners can request any station within ±1.05 MHz of `SDR_CENTER_MHZ`.
+Or with explicit flags:
+
+```sh
+cargo run --release -- audiotap \
+  --tap-id my-sdr-tap --api-token secret --center-mhz 98.0 \
+  --listen-host 0.0.0.0 --listen-port 7871
+```
+
+Once connected, listeners can request any station within ±1.05 MHz of the current centre frequency.
+
+## HTTP control API
+
+A small actix-web API is exposed on `--listen-host:--listen-port` (default `127.0.0.1:7871`) for observability and runtime control.
+
+| Method | Path | Body | Description |
+|---|---|---|---|
+| GET | `/healthz` | — | Liveness probe (`ok`) |
+| GET | `/api/v1/stats` | — | JSON: centre Hz, sample rate, listener count, chunks pushed, retunes, gain, hub-connected |
+| POST | `/api/v1/retune` | `{"hz": u32}` or `{"mhz": f64}` | Request a centre-frequency change; returns the confirmed actual frequency |
+| POST | `/api/v1/gain` | `{"tenths_db": u32}` | Adjust tuner gain (e.g. `150` → 15.0 dB) |
+
+```sh
+curl localhost:7871/api/v1/stats
+curl -X POST localhost:7871/api/v1/retune -H 'content-type: application/json' -d '{"mhz": 99.5}'
+curl -X POST localhost:7871/api/v1/gain   -H 'content-type: application/json' -d '{"tenths_db": 280}'
+```
 
 ## Docker
 
@@ -129,10 +157,26 @@ The compose file uses `network_mode: host` so the container can reach `rtl_tcp` 
 
 ```
 src/
-├── main.rs        entry point, env config, tap builder
-├── shared_sdr.rs  single rtl_tcp connection, broadcast channel for I/Q chunks
-├── sdr.rs         SdrTapHandler — TapHandler implementation, DDC/demod pipeline
-├── rtltcp.rs      async rtl_tcp client (TCP, binary protocol)
-└── demod.rs       FM/AM demodulator, de-emphasis, decimation, WAV header
-references/        reference implementation of the Zako3 SDK tap pattern
+├── main.rs                       clap CLI + tokio runtime + ModuleManager dispatch
+├── common/arguments.rs           shared --listen-*, --disable-cross-site, -q/-v
+├── modules/
+│   ├── mod.rs                    XngModule trait + ModuleManager (vendored from xng, trimmed)
+│   ├── session.rs                Session trait + EndSessionReason (vendored from xng)
+│   └── audiotap/
+│       ├── mod.rs                AudioTapModule — clap args, init, Zako3 tap + rtl_tcp tasks
+│       ├── session.rs            AudioTapSession (forever-pending; interrupt drives shutdown)
+│       ├── shared_sdr.rs         single rtl_tcp connection, broadcast/ring buffer for I/Q
+│       ├── rtltcp.rs             async rtl_tcp client (TCP, binary protocol)
+│       ├── demod.rs              FM/AM demodulator, de-emphasis, decimation, WAV header
+│       ├── handler.rs            SdrTapHandler — TapHandler impl, source parsing, retune
+│       ├── dsp.rs                run_ddc_demod + stream_and_encode (ffmpeg → Opus)
+│       └── http.rs               /api/v1/stats, /retune, /gain
+└── server/
+    ├── mod.rs
+    └── services/                 /healthz and other module-agnostic routes
+references/                       reference implementation of the Zako3 SDK tap pattern
 ```
+
+## Acknowledgements
+
+The CLI shape (`ModuleManager`, `XngModule`, `Session`, `common::arguments`, the actix-web HTTP server bootstrap) is **vendored and adapted from [airframesio/xng](https://github.com/airframesio/xng)** (GPL-3.0-or-later). The xng-derived files carry an attribution comment at the top. This project remains licensed under AGPL-3.0; the xng pieces are forward-compatible per the FSF's GPL→AGPL compatibility guidance.

@@ -1,5 +1,6 @@
 /// Convert raw rtl_tcp u8 I/Q bytes to normalized f32 pairs.
 /// Each byte is offset by 127.5: 0 → -1.0, 127 ≈ 0.0, 255 → +1.0.
+#[allow(dead_code)]
 pub fn convert_iq(raw: &[u8]) -> Vec<(f32, f32)> {
     raw.chunks_exact(2)
         .map(|c| {
