@@ -1,16 +1,59 @@
-use std::sync::Arc;
-use tokio::sync::{broadcast, watch};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use tokio::sync::{broadcast, watch, Notify};
 
 use crate::rtltcp::RtlTcpClient;
 
 pub const WIDE_SAMPLE_RATE: u32 = 2_400_000;
 const CHUNK_BYTES: usize = WIDE_SAMPLE_RATE as usize / 10 * 2; // 100 ms of I/Q bytes
+const RING_CAPACITY: usize = 20; // 2 s of staged I/Q data
+
+struct IqBuffer {
+    deque: Mutex<VecDeque<Arc<Vec<u8>>>>,
+    notify: Notify,
+}
+
+impl IqBuffer {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            deque: Mutex::new(VecDeque::with_capacity(RING_CAPACITY)),
+            notify: Notify::new(),
+        })
+    }
+
+    fn push(&self, chunk: Arc<Vec<u8>>) {
+        let mut dq = self.deque.lock().unwrap();
+        if dq.len() >= RING_CAPACITY {
+            dq.pop_front();
+        }
+        dq.push_back(chunk);
+        drop(dq);
+        self.notify.notify_one();
+    }
+
+    async fn pop(&self) -> Arc<Vec<u8>> {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            // Enable before inspecting the queue so a concurrent push isn't missed.
+            notified.as_mut().enable();
+            {
+                let mut dq = self.deque.lock().unwrap();
+                if let Some(chunk) = dq.pop_front() {
+                    return chunk;
+                }
+            }
+            notified.await;
+        }
+    }
+}
 
 pub struct SharedSdr {
     desired_tx: watch::Sender<u32>,
     actual_tx: watch::Sender<u32>,
     pub sample_rate: u32,
     tx: broadcast::Sender<Arc<Vec<u8>>>,
+    iq_buffer: Arc<IqBuffer>,
 }
 
 impl SharedSdr {
@@ -23,6 +66,7 @@ impl SharedSdr {
             actual_tx,
             sample_rate: WIDE_SAMPLE_RATE,
             tx,
+            iq_buffer: IqBuffer::new(),
         })
     }
 
@@ -57,6 +101,16 @@ impl SharedSdr {
     }
 
     pub async fn run(self: Arc<Self>, host: String, port: u16) {
+        // Drain the ring buffer and fan out to broadcast receivers.
+        let iq_buf = self.iq_buffer.clone();
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            loop {
+                let chunk = iq_buf.pop().await;
+                let _ = tx.send(chunk);
+            }
+        });
+
         loop {
             tracing::info!(center_hz = self.center_hz(), "connecting to rtl_tcp");
             match self.run_inner(&host, port).await {
@@ -98,8 +152,8 @@ impl SharedSdr {
         loop {
             client.read_samples(&mut buf).await?;
             let receivers = self.tx.receiver_count();
-            tracing::trace!(chunks_sent, receivers, "I/Q chunk broadcast");
-            let _ = self.tx.send(Arc::new(buf.clone()));
+            tracing::trace!(chunks_sent, receivers, "I/Q chunk pushed to ring buffer");
+            self.iq_buffer.push(Arc::new(buf.clone()));
             chunks_sent += 1;
 
             // Check for a pending retune between reads (never mid-buffer).
