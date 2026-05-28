@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{broadcast, watch, Notify};
+use tokio::sync::{Notify, broadcast, watch};
 
 use crate::rtltcp::RtlTcpClient;
 
