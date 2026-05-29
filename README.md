@@ -48,13 +48,13 @@ services:
     environment:
       SDR_TAP_ID: ${SDR_TAP_ID}
       SDR_API_TOKEN: ${SDR_API_TOKEN}
-      SDR_CENTER_MHZ: ${SDR_CENTER_MHZ:-98.0}
       TAPHUB_ENDPOINT: ${TAPHUB_ENDPOINT:-api.zako.ac}
       RTLTCP_HOST: ${RTLTCP_HOST:-localhost}
       RTLTCP_PORT: ${RTLTCP_PORT:-1234}
     network_mode: host
     restart: unless-stopped
 ```
+`SDR_CENTER_MHZ` (and any other required values) come from the `env_file: .env` above.
 if you need pre-built image, use `ghcr.io/200mill/tap-sdr`
 ```diff
 services:
@@ -65,7 +65,6 @@ services:
     environment:
       SDR_TAP_ID: ${SDR_TAP_ID}
       SDR_API_TOKEN: ${SDR_API_TOKEN}
-      SDR_CENTER_MHZ: ${SDR_CENTER_MHZ:-98.0}
       TAPHUB_ENDPOINT: ${TAPHUB_ENDPOINT:-api.zako.ac}
       RTLTCP_HOST: ${RTLTCP_HOST:-localhost}
       RTLTCP_PORT: ${RTLTCP_PORT:-1234}
@@ -93,7 +92,32 @@ The binary now uses a clap-based CLI shaped after [airframesio/xng](https://gith
 | `--disable-cross-site` | — | no | off | Restrict CORS to the bound listener |
 | `--dsp-backend` | `SDR_DSP_BACKEND` | no | `legacy` | Per-listener DSP pipeline: `legacy` (hand-rolled) or `futuresdr` ([FutureSDR](https://www.futuresdr.org/) flowgraph) |
 
-Copy `.env.example` to `.env` and fill in the required values.
+Copy `.env.example` to `.env` and fill in the required values:
+
+```sh
+# Required
+SDR_TAP_ID=your-tap-id
+SDR_API_TOKEN=your-api-token
+SDR_CENTER_MHZ=98.0
+
+# Tap Hub
+TAPHUB_ENDPOINT=api.zako.ac
+# TAPHUB_SERVER_NAME=
+
+# Health check (optional, expose a port for liveness probes)
+# TAP_HEALTHCHECK_PORT=8080
+
+# rtl_tcp server — set to the rtl_tcp service name when using docker-compose
+RTLTCP_HOST=rtltcp
+RTLTCP_PORT=1234
+
+# HTTP control/stats API bind (defaults: 127.0.0.1:7871)
+# TAP_LISTEN_HOST=127.0.0.1
+# TAP_LISTEN_PORT=7871
+
+# DSP backend: 'legacy' (default, hand-rolled) or 'futuresdr' (FutureSDR flowgraph)
+# SDR_DSP_BACKEND=legacy
+```
 
 ### DSP backend
 
@@ -173,23 +197,34 @@ The compose file uses `network_mode: host` so the container can reach `rtl_tcp` 
 ```
 src/
 ├── main.rs                       clap CLI + tokio runtime + ModuleManager dispatch
-├── common/arguments.rs           shared --listen-*, --disable-cross-site, -q/-v
+├── common/
+│   ├── mod.rs
+│   └── arguments.rs              shared --listen-*, --disable-cross-site, -q/-v (vendored from xng)
 ├── modules/
-│   ├── mod.rs                    XngModule trait + ModuleManager (vendored from xng, trimmed)
+│   ├── mod.rs                    XngModule trait + ModuleManager + actix HTTP server (vendored from xng, trimmed)
 │   ├── session.rs                Session trait + EndSessionReason (vendored from xng)
 │   └── audiotap/
 │       ├── mod.rs                AudioTapModule — clap args, init, Zako3 tap + rtl_tcp tasks
+│       ├── backend.rs            DspBackend enum (legacy | futuresdr) + parsing
 │       ├── session.rs            AudioTapSession (forever-pending; interrupt drives shutdown)
-│       ├── shared_sdr.rs         single rtl_tcp connection, broadcast/ring buffer for I/Q
+│       ├── shared_sdr.rs         single rtl_tcp connection, ring buffer + broadcast of I/Q
 │       ├── rtltcp.rs             async rtl_tcp client (TCP, binary protocol)
-│       ├── demod.rs              FM/AM demodulator, de-emphasis, decimation, WAV header
-│       ├── handler.rs            SdrTapHandler — TapHandler impl, source parsing, retune
-│       ├── dsp.rs                run_ddc_demod + stream_and_encode (ffmpeg → Opus)
-│       └── http.rs               /api/v1/stats, /retune, /gain
+│       ├── demod.rs              FM/AM demod, de-emphasis, decimation, WAV header, PCM packing
+│       ├── handler.rs            SdrTapHandler — TapHandler impl, source parsing, retune, backend dispatch
+│       ├── dsp.rs                legacy DSP: run_ddc_demod + stream_and_encode (ffmpeg → Opus)
+│       ├── http.rs               /api/v1/stats, /retune, /gain
+│       └── blocks/               FutureSDR backend: flowgraph + custom DSP blocks
+│           ├── mod.rs            build_flowgraph + tokio feeder/drainer bridge tasks
+│           ├── ddc.rs            NCO down-conversion + decimation block
+│           ├── fm_demod.rs       FM discriminator block
+│           ├── am_envelope.rs    AM envelope detector block
+│           ├── deemphasis.rs     FM de-emphasis block
+│           └── decimate.rs       decimation block
 └── server/
     ├── mod.rs
-    └── services/                 /healthz and other module-agnostic routes
-references/                       reference implementation of the Zako3 SDK tap pattern
+    └── services/
+        ├── mod.rs
+        └── health.rs             /healthz liveness route
 ```
 
 ## Acknowledgements
