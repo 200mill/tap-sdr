@@ -1,0 +1,6 @@
+# FutureSDR (via `--dsp-backend futuresdr`) depends on `futuredsp`, whose lib.rs unconditionally declares
+# `#![feature(float_algebraic)]`. That feature is already stabilized in current stable Rust, so the gate
+# now errors on the stable channel (E0554). Until `futuredsp`/`futuresdr` drop the gate, RUSTC_BOOTSTRAP=1
+# lets the stable toolchain accept it. This applies to the whole build — see README "Building".
+[env]
+RUSTC_BOOTSTRAP = "1"

@@ -1,10 +1,13 @@
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use futuresdr::prelude::Runtime;
 use zako3_tap_sdk::{
     AttachedMetadata, AudioCachePolicy, AudioCacheType, AudioMetadata, AudioMetadataSuccessMessage,
     AudioRequestSuccessMessage, AudioSource, AudioStreamSender, TapError, TapHandler,
 };
 
+use super::backend::DspBackend;
+use super::blocks;
 use super::dsp::{PIPE_CAPACITY, run_ddc_demod, stream_and_encode};
 use super::shared_sdr::{SharedSdr, WIDE_SAMPLE_RATE};
 
@@ -38,6 +41,9 @@ fn title_for(source: &AudioSource) -> String {
 
 pub struct SdrTapHandler {
     pub sdr: Arc<SharedSdr>,
+    pub backend: DspBackend,
+    /// Shared FutureSDR runtime (smol scheduler), present only when `backend == FutureSdr`.
+    pub runtime: Option<Arc<Runtime>>,
 }
 
 #[async_trait::async_trait]
@@ -90,16 +96,30 @@ impl TapHandler for SdrTapHandler {
             "starting SDR stream"
         );
 
-        let rx = self.sdr.subscribe();
-        let retune_rx = self.sdr.actual_center_rx();
-        let (mut writer, reader) = tokio::io::duplex(PIPE_CAPACITY);
+        let (writer, reader) = tokio::io::duplex(PIPE_CAPACITY);
 
-        tokio::spawn(async move {
-            match run_ddc_demod(center_hz, freq_hz, mode, rx, &mut writer, retune_rx).await {
-                Ok(()) => tracing::info!(freq_hz, ?mode, "DDC/demod task ended cleanly"),
-                Err(e) => tracing::error!(freq_hz, ?mode, "DDC/demod task error: {e:?}"),
+        match self.backend {
+            DspBackend::Legacy => {
+                let rx = self.sdr.subscribe();
+                let retune_rx = self.sdr.actual_center_rx();
+                let mut writer = writer;
+                tokio::spawn(async move {
+                    match run_ddc_demod(center_hz, freq_hz, mode, rx, &mut writer, retune_rx).await {
+                        Ok(()) => tracing::info!(freq_hz, ?mode, "DDC/demod task ended cleanly"),
+                        Err(e) => tracing::error!(freq_hz, ?mode, "DDC/demod task error: {e:?}"),
+                    }
+                });
             }
-        });
+            DspBackend::FutureSdr => {
+                let runtime = self.runtime.clone().ok_or_else(|| {
+                    TapError::Permanent("FutureSDR runtime not initialized".to_string())
+                })?;
+                blocks::spawn_listener(&runtime, self.sdr.clone(), center_hz, freq_hz, mode, writer)
+                    .await
+                    .map_err(|e| TapError::Retriable(format!("failed to start FutureSDR pipeline: {e}")))?;
+                tracing::info!(freq_hz, ?mode, "FutureSDR pipeline started");
+            }
+        }
 
         stream.unreliable_only();
 

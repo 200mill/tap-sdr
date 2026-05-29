@@ -1,3 +1,5 @@
+pub mod backend;
+pub mod blocks;
 pub mod demod;
 pub mod dsp;
 pub mod handler;
@@ -14,6 +16,7 @@ use tokio::io;
 use tokio::task::JoinHandle;
 use zako3_tap_sdk::tap;
 
+use self::backend::DspBackend;
 use self::handler::SdrTapHandler;
 use self::session::AudioTapSession;
 use self::shared_sdr::SharedSdr;
@@ -31,6 +34,7 @@ pub struct AudioTapModule {
     rtltcp_port: u16,
     center_hz: u32,
     healthcheck_port: Option<u16>,
+    backend: DspBackend,
     shared_sdr: Option<Arc<SharedSdr>>,
     sdr_task: Option<JoinHandle<()>>,
     zako_task: Option<JoinHandle<()>>,
@@ -47,6 +51,7 @@ impl AudioTapModule {
             rtltcp_port: 1234,
             center_hz: 0,
             healthcheck_port: None,
+            backend: DspBackend::default(),
             shared_sdr: None,
             sdr_task: None,
             zako_task: None,
@@ -105,6 +110,11 @@ impl XngModule for AudioTapModule {
                     .env("TAP_HEALTHCHECK_PORT")
                     .value_parser(value_parser!(u16))
                     .help("Optional standalone Zako3 SDK healthcheck port (separate from --listen-port)"),
+                Arg::new("dsp-backend")
+                    .long("dsp-backend")
+                    .env("SDR_DSP_BACKEND")
+                    .default_value("legacy")
+                    .help("Per-listener DSP pipeline: 'legacy' (hand-rolled) or 'futuresdr' (FutureSDR flowgraph)"),
             ])
     }
 
@@ -134,10 +144,19 @@ impl XngModule for AudioTapModule {
             self.rtltcp_port = *port;
         }
         self.healthcheck_port = args.get_one::<u16>("healthcheck-port").copied();
+        if let Some(backend_str) = args.get_one::<String>("dsp-backend") {
+            self.backend = DspBackend::parse(backend_str).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("invalid --dsp-backend: {backend_str} (expected 'legacy' or 'futuresdr')"),
+                )
+            })?;
+        }
         Ok(())
     }
 
     async fn init(&mut self) -> Result<(), io::Error> {
+        tracing::info!(backend = self.backend.as_str(), "DSP backend selected");
         let shared_sdr = SharedSdr::new(self.center_hz);
         self.shared_sdr = Some(shared_sdr.clone());
 
@@ -151,8 +170,22 @@ impl XngModule for AudioTapModule {
         };
         self.sdr_task = Some(sdr_task);
 
+        let runtime = if self.backend == DspBackend::FutureSdr {
+            // FutureSDR's control-port web server defaults to on (binds 127.0.0.1:1337); we don't
+            // want it. The config is read lazily on first Runtime construction, so set the env var
+            // first. SAFETY: called once during init before any other thread reads the environment.
+            unsafe {
+                std::env::set_var("FUTURESDR_CTRLPORT_ENABLE", "false");
+            }
+            Some(Arc::new(futuresdr::runtime::Runtime::new()))
+        } else {
+            None
+        };
+
         let handler = SdrTapHandler {
             sdr: shared_sdr.clone(),
+            backend: self.backend,
+            runtime,
         };
         let mut builder = tap()
             .hub(&self.hub_endpoint)

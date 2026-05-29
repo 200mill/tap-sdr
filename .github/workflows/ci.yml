@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [master, pf3]
+    branches: *
   pull_request:
     branches: [master]
 

@@ -1,6 +1,10 @@
-FROM rust:1.88-slim AS builder
+FROM rust:1.95-slim AS builder
 
 RUN apt-get update && apt-get install -y pkg-config libssl-dev cmake g++ && rm -rf /var/lib/apt/lists/*
+
+# FutureSDR's `futuredsp` dep declares `#![feature(float_algebraic)]` (now stabilized), which errors on
+# the stable channel. RUSTC_BOOTSTRAP=1 lets the stable toolchain accept it (mirrors .cargo/config.toml).
+ENV RUSTC_BOOTSTRAP=1
 
 WORKDIR /build
 

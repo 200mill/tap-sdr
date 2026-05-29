@@ -91,8 +91,23 @@ The binary now uses a clap-based CLI shaped after [airframesio/xng](https://gith
 | `--listen-host` | `TAP_LISTEN_HOST` | no | `127.0.0.1` | HTTP control/stats API bind host |
 | `--listen-port` | `TAP_LISTEN_PORT` | no | `7871` | HTTP control/stats API port |
 | `--disable-cross-site` | — | no | off | Restrict CORS to the bound listener |
+| `--dsp-backend` | `SDR_DSP_BACKEND` | no | `legacy` | Per-listener DSP pipeline: `legacy` (hand-rolled) or `futuresdr` ([FutureSDR](https://www.futuresdr.org/) flowgraph) |
 
 Copy `.env.example` to `.env` and fill in the required values.
+
+### DSP backend
+
+The signal-processing chain has two interchangeable implementations selected at startup:
+
+- **`legacy`** (default): the hand-rolled tokio DSP (NCO down-conversion, FM/AM demod, de-emphasis, decimation).
+- **`futuresdr`**: the same DSP expressed as a [FutureSDR](https://www.futuresdr.org/) flowgraph
+  (`ChannelSource → Ddc → demod → Deemphasis → Decimate → ChannelSink`). Hardware acquisition (rtl_tcp) and
+  Opus/hub streaming are unchanged; only the per-listener math runs on FutureSDR's scheduler.
+
+> **Build note:** FutureSDR's `futuredsp` dependency declares `#![feature(float_algebraic)]`, which is now
+> stabilized and therefore rejected on the stable channel. The repo's `.cargo/config.toml` sets
+> `RUSTC_BOOTSTRAP=1` so `cargo build` works on stable Rust (the Dockerfile sets the same env). Remove it once
+> FutureSDR drops the gate.
 
 ## Running
 

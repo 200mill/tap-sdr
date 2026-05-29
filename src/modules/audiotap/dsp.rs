@@ -7,12 +7,12 @@ use super::demod;
 use super::handler::Mode;
 use super::shared_sdr::WIDE_SAMPLE_RATE;
 
-const DDC_DECIMATE: usize = 10;
-const NARROW_RATE: u32 = WIDE_SAMPLE_RATE / DDC_DECIMATE as u32; // 240 000 Hz
-const AUDIO_DECIMATE: usize = 5;
-const AUDIO_RATE: u32 = NARROW_RATE / AUDIO_DECIMATE as u32; // 48 000 Hz
+pub const DDC_DECIMATE: usize = 10;
+pub const NARROW_RATE: u32 = WIDE_SAMPLE_RATE / DDC_DECIMATE as u32; // 240 000 Hz
+pub const AUDIO_DECIMATE: usize = 5;
+pub const AUDIO_RATE: u32 = NARROW_RATE / AUDIO_DECIMATE as u32; // 48 000 Hz
 pub const PIPE_CAPACITY: usize = 512 * 1024;
-const AUDIO_GAIN: f32 = 0.1; // -20 dB
+pub const AUDIO_GAIN: f32 = 0.1; // -20 dB
 
 pub async fn stream_and_encode(
     reader: impl tokio::io::AsyncRead + Unpin + Send + 'static,
