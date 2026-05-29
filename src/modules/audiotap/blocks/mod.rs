@@ -213,7 +213,10 @@ mod tests {
             let phase = 2.0 * std::f64::consts::PI * tone_hz * k as f64 / WIDE_SAMPLE_RATE as f64;
             samples.push(Complex32::new(phase.cos() as f32, phase.sin() as f32));
         }
-        iq_tx.send(samples.into_boxed_slice()).await.expect("send iq");
+        iq_tx
+            .send(samples.into_boxed_slice())
+            .await
+            .expect("send iq");
         drop(iq_tx); // signal end-of-stream so the graph terminates
 
         // Supervisor: when the graph finishes, drop the returned flowgraph to close the sink sender.
@@ -243,6 +246,9 @@ mod tests {
             "all audio samples must be finite"
         );
         let peak = collected.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
-        assert!(peak > 1e-4, "expected non-zero demodulated audio, peak={peak}");
+        assert!(
+            peak > 1e-4,
+            "expected non-zero demodulated audio, peak={peak}"
+        );
     }
 }

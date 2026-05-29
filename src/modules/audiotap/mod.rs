@@ -148,7 +148,9 @@ impl XngModule for AudioTapModule {
             self.backend = DspBackend::parse(backend_str).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    format!("invalid --dsp-backend: {backend_str} (expected 'legacy' or 'futuresdr')"),
+                    format!(
+                        "invalid --dsp-backend: {backend_str} (expected 'legacy' or 'futuresdr')"
+                    ),
                 )
             })?;
         }

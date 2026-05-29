@@ -38,7 +38,9 @@ pub fn parse_listen_host(args: &ArgMatches, default: &str) -> String {
 }
 
 pub fn parse_listen_port(args: &ArgMatches, default: u16) -> u16 {
-    args.get_one::<u16>("listen-port").copied().unwrap_or(default)
+    args.get_one::<u16>("listen-port")
+        .copied()
+        .unwrap_or(default)
 }
 
 pub fn parse_disable_cross_site(args: &ArgMatches) -> bool {

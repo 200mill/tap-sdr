@@ -1,6 +1,6 @@
+use futuresdr::prelude::Runtime;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use futuresdr::prelude::Runtime;
 use zako3_tap_sdk::{
     AttachedMetadata, AudioCachePolicy, AudioCacheType, AudioMetadata, AudioMetadataSuccessMessage,
     AudioRequestSuccessMessage, AudioSource, AudioStreamSender, TapError, TapHandler,
@@ -54,9 +54,7 @@ impl TapHandler for SdrTapHandler {
     ) -> Result<AudioMetadataSuccessMessage, TapError> {
         tracing::debug!(source = source.as_str(), "metadata request");
         // Mark hub as connected on first interaction.
-        self.sdr
-            .hub_connected_handle()
-            .store(1, Ordering::Relaxed);
+        self.sdr.hub_connected_handle().store(1, Ordering::Relaxed);
         Ok(AudioMetadataSuccessMessage {
             metadatas: vec![AudioMetadata::Title(title_for(&source))],
             cache: AudioCachePolicy {
@@ -71,9 +69,7 @@ impl TapHandler for SdrTapHandler {
         source: AudioSource,
         stream: AudioStreamSender,
     ) -> Result<AudioRequestSuccessMessage, TapError> {
-        self.sdr
-            .hub_connected_handle()
-            .store(1, Ordering::Relaxed);
+        self.sdr.hub_connected_handle().store(1, Ordering::Relaxed);
 
         let (mode, freq_hz) = parse_source(&source)
             .ok_or_else(|| TapError::Permanent(format!("invalid source: {}", source.as_str())))?;
@@ -104,7 +100,8 @@ impl TapHandler for SdrTapHandler {
                 let retune_rx = self.sdr.actual_center_rx();
                 let mut writer = writer;
                 tokio::spawn(async move {
-                    match run_ddc_demod(center_hz, freq_hz, mode, rx, &mut writer, retune_rx).await {
+                    match run_ddc_demod(center_hz, freq_hz, mode, rx, &mut writer, retune_rx).await
+                    {
                         Ok(()) => tracing::info!(freq_hz, ?mode, "DDC/demod task ended cleanly"),
                         Err(e) => tracing::error!(freq_hz, ?mode, "DDC/demod task error: {e:?}"),
                     }
@@ -114,9 +111,18 @@ impl TapHandler for SdrTapHandler {
                 let runtime = self.runtime.clone().ok_or_else(|| {
                     TapError::Permanent("FutureSDR runtime not initialized".to_string())
                 })?;
-                blocks::spawn_listener(&runtime, self.sdr.clone(), center_hz, freq_hz, mode, writer)
-                    .await
-                    .map_err(|e| TapError::Retriable(format!("failed to start FutureSDR pipeline: {e}")))?;
+                blocks::spawn_listener(
+                    &runtime,
+                    self.sdr.clone(),
+                    center_hz,
+                    freq_hz,
+                    mode,
+                    writer,
+                )
+                .await
+                .map_err(|e| {
+                    TapError::Retriable(format!("failed to start FutureSDR pipeline: {e}"))
+                })?;
                 tracing::info!(freq_hz, ?mode, "FutureSDR pipeline started");
             }
         }

@@ -79,7 +79,11 @@ where
             self.osc_i = 1.0;
             self.osc_q = 0.0;
             self.osc_ticks = 0;
-            trace!(new_center, freq_hz = self.freq_hz, "DDC NCO recomputed after retune");
+            trace!(
+                new_center,
+                freq_hz = self.freq_hz,
+                "DDC NCO recomputed after retune"
+            );
         }
 
         let inp = self.input.slice();

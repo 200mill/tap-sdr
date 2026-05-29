@@ -46,10 +46,7 @@ async fn get_stats(sdr: Data<Arc<SharedSdr>>) -> impl Responder {
     })
 }
 
-async fn post_retune(
-    sdr: Data<Arc<SharedSdr>>,
-    body: web::Json<RetuneRequest>,
-) -> impl Responder {
+async fn post_retune(sdr: Data<Arc<SharedSdr>>, body: web::Json<RetuneRequest>) -> impl Responder {
     let target_hz = match (body.hz, body.mhz) {
         (Some(hz), _) => hz,
         (None, Some(mhz)) => (mhz * 1_000_000.0).round() as u32,
@@ -67,10 +64,7 @@ async fn post_retune(
     })
 }
 
-async fn post_gain(
-    sdr: Data<Arc<SharedSdr>>,
-    body: web::Json<GainRequest>,
-) -> impl Responder {
+async fn post_gain(sdr: Data<Arc<SharedSdr>>, body: web::Json<GainRequest>) -> impl Responder {
     // Most R820T-class tuners top out around 49.6 dB.
     if body.tenths_db > 500 {
         return HttpResponse::BadRequest().body("tenths_db out of plausible range (max 500)");
