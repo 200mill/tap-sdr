@@ -15,7 +15,9 @@ RUN mkdir src && echo 'fn main(){}' > src/main.rs && cargo build --release; rm -
 COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
-FROM debian:bookworm-slim
+# Must match the builder's Debian release (rust:1.95-slim is trixie-based, glibc 2.41).
+# A runtime with older glibc fails: "version `GLIBC_2.3x' not found (required by sdr-tap)".
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
 
